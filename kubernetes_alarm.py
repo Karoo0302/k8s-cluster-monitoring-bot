@@ -23,7 +23,8 @@ api_client = None
 
 status_color = {
     'Green' : '🟢',
-    'Red' : '🔴'
+    'Red' : '🔴',
+    'Yellow' : '🟡'
 }
 
 keyboard_reply = ReplyKeyboardMarkup(
@@ -44,22 +45,33 @@ async def errsend(message: types.message, reason: types.message):
 def check_nodes():
     global k8s_nodes_lists, k8s_nodes_status
     err_node = []
+    new_node = []
     print(k8s_nodes_lists)
     print(k8s_nodes_status)
 
     # if (k8s_nodes_lists == []):
     #     print("k8s_nodes_list is Empty")
-    
-    for i in k8s_nodes_lists:
-        if any(i[0] == x[0] for x in k8s_nodes_status):
-            continue
-        err_node.append(i[0])
-        print("Node : " + i[0] + " is down")
-    
+    if (len(k8s_nodes_lists) > len(k8s_nodes_status)):
+        print("Nodes Down Detecd")
+        for i in k8s_nodes_lists:
+            if any(i[0] == x[0] for x in k8s_nodes_status):
+                continue
+            err_node.append(i[0])
+            print("Node : " + i[0] + " is down")
+    elif (len(k8s_nodes_lists) < len(k8s_nodes_status)):
+        print("New Nodes Detecd")
+        for i in k8s_nodes_status:
+            if any(i[0] == x[0] for x in k8s_nodes_lists):
+                continue
+            new_node.append(i[0])
+            print("Node : " + i[0] + " is New connecting")
+
     if len(err_node) != 0:
-        return err_node
-    elif len(err_node) == 0:
-        return None
+        return "Node Down Detect", err_node
+    elif len(new_node) != 0:
+        return "New Node Detect", new_node
+    else:
+        return None, None
 
 
 @dp.message_handler(commands=['start', 'help'])
@@ -70,6 +82,10 @@ async def welcome(message: types.Message):
     schedule_node = AsyncIOScheduler()
     schedule_node.add_job(schedule_node_check, 'cron', second="*/10")
     schedule_node.start()
+
+    schedule_pod = AsyncIOScheduler()
+    schedule_pod.add_job(schedule_pod_check, 'cron', second="*/5")
+    schedule_pod.start()
     #await message.reply("Hello! how are you?", reply_markup=keyboard_reply)
 
 
@@ -82,7 +98,7 @@ async def update_nodes_list(message: types.Message):
     for stats in k8s_nodes['items']:
             node_name = stats['metadata']['name'][3:]
             node_cpu_usage = (str)((int)(stats['usage']['cpu'][:-1])//1000000)+"m"
-            node_memory_usage = (int)(stats['usage']['memory'][:-2])//1000
+            node_memory_usage = (str)((int)(stats['usage']['memory'][:-2])//1000)+"Mi"
             k8s_nodes_lists.append([node_name, node_cpu_usage, node_memory_usage])
     print("update success")
 
@@ -90,35 +106,51 @@ async def update_nodes_list(message: types.Message):
 @dp.message_handler()
 async def check_rp(message: types.Message):
     top = client.CustomObjectsApi()
-    global k8s_nodes_status
+    global k8s_nodes_status, k8s_nodes_lists
     k8s_nodes_status = []
     message_txt = ""
     if message.text == 'Node_Status':
         message_txt = "------------ Lawdians Internal K8S ------------\n"
         # Responding with a message for the first button
-        k8s_nodes = top.list_cluster_custom_object("metrics.k8s.io","v1beta1", "nodes")
+        try:
+            k8s_nodes = top.list_cluster_custom_object("metrics.k8s.io","v1beta1", "nodes")
+        except:
+            await errsend("K8S Node status View Failed","Reason : Cluster Connect Error")
+
         for stats in k8s_nodes['items']:
             node_name = stats['metadata']['name'][3:]
             node_cpu_usage = (str)((int)(stats['usage']['cpu'][:-1])//1000000)+"m"
             node_memory_usage = (str)((int)(stats['usage']['memory'][:-2])//1000)+"Mi"
             k8s_nodes_status.append([node_name, node_cpu_usage, node_memory_usage])
-            message_txt = message_txt + f"{status_color['Green']}  {node_name:<11s} CPU: {node_cpu_usage:>4s} Mem: {node_memory_usage:>7s}\n"
+            if any(node_name == x[0] for x in k8s_nodes_lists):
+            #if any(node_name == x for x in Detect ):
+                message_txt = message_txt + f"{status_color['Green']}  {node_name:<11s} CPU: {node_cpu_usage:>4s} Mem: {node_memory_usage:>7s}\n"
+        
+        Detect, find_nodes = check_nodes()
 
-        err_nodes = check_nodes()
-
-        if err_nodes == None:
+        if Detect == None:
             await bot.send_message(id, message_txt)
-        elif err_nodes != None:
+        elif Detect == "Node Down Detect":
             #message_txt = message_txt + "\n----------------err node----------------\nn"
-            for i in err_nodes:
+            for i in find_nodes:
                 print(i)
-                #message_txt += (i + " is Down")   
                 message_txt = message_txt + f"{status_color['Red']}  {i:<11s} CPU:  ??m Mem:  ????Mi\n"
+            await bot.send_message(id, message_txt)
+        elif Detect == "New Node Detect":
+            for i in find_nodes:
+                print(i)
+                message_txt = message_txt + f"{status_color['Yellow']}  {i:<11s} CPU:  ??m Mem:  ????Mi\n"
             await bot.send_message(id, message_txt)
 
     elif message.text == 'Pod_Check':
-        k8s_nodes_lists = ""
-        #resource = api_client.list_node()
+        try:
+            top = client.CustomObjectsApi()
+            k8s_nodes = top.list_cluster_custom_object("metrics.k8s.io","v1beta1", "nodes")
+        except:
+            await err()
+        #message_txt = "------------ Lawdians Internal K8S ------------\n"
+        message_txt = "------------- Lawdians Pods List -------------\n"
+        err_pods = ""
         ret = api_client.list_pod_for_all_namespaces(watch=False)
         running_pods_num = 0
         for info in ret.items:
@@ -129,9 +161,12 @@ async def check_rp(message: types.Message):
             if running != None:
                 running_pods_num += 1
             elif running == None and terminated == None:
-                k8s_nodes_lists += f"{namespace}  {pod_name}  "+ info.status.container_statuses[0].state.waiting.reason + "\n"
-        await bot.send_message(message.from_user.id, running_pods_num)
-
+                err_pods += f"{namespace}  {pod_name}  "+ info.status.container_statuses[0].state.waiting.reason + "\n"
+        if err_pods == "":
+            await botsend(f"{message_txt}{status_color['Green']} Running Pods : {running_pods_num}")
+        else:
+            await botsend(f"{message_txt}{status_color['Green']} Running Pods : {running_pods_num}\n\n{status_color['Red']} Error Pods List\n{err_pods}")
+        
 
 async def schedule_node_check():
     print("schedule_node_ckeck start")
@@ -146,21 +181,52 @@ async def schedule_node_check():
     for stats in k8s_nodes['items']:
         node_name = stats['metadata']['name'][3:]
         node_cpu_usage = (str)((int)(stats['usage']['cpu'][:-1])//1000000)+"m"
-        node_memory_usage = (int)(stats['usage']['memory'][:-2])//1000
+        node_memory_usage = (str)((int)(stats['usage']['memory'][:-2])//1000)+"Mi"
         k8s_nodes_status.append([node_name, node_cpu_usage, node_memory_usage])
     
-    err_nodes = check_nodes()
+    Detect, find_nodes = check_nodes()
     message_txt =""
-    if err_nodes != None:
-        #message_txt = message_txt + "\n----------------err node----------------\nn"
-        for i in err_nodes:
+    if Detect == "Node Down Detect":
+        for i in find_nodes:
             print(i)
             message_txt = message_txt + f"{status_color['Red']}  {i:<11s}         is UNKNOWN        \n"
-        await errsend("--------------🚨 Node Down Detect 🚨--------------", message_txt)
-
-    elif err_nodes == None:
+        await errsend("-----------🚨 Node Down Detect 🚨-----------", message_txt)
+    elif Detect == "New Node Detect":
+        for i in find_nodes:
+            print(i)
+            message_txt = message_txt + f"{status_color['Yellow']}  {i:<11s}    is New_connecting   \n"
+        await errsend("------------🚨 New Node Detect 🚨------------", message_txt)
+    else:
         print("schedule_node_check_Report : Stable")
 
+
+async def schedule_pod_check():
+    try:
+        top = client.CustomObjectsApi()
+        k8s_nodes = top.list_cluster_custom_object("metrics.k8s.io","v1beta1", "nodes")
+    except:
+        await err()
+    
+    err_pod_lists = ""
+    err_pod_num = 0
+    #resource = api_client.list_node()
+    ret = api_client.list_pod_for_all_namespaces(watch=False)
+    running_pods_num = 0
+    for info in ret.items:
+        running = info.status.container_statuses[0].state.running
+        terminated = info.status.container_statuses[0].state.terminated
+        namespace = info.metadata.namespace 
+        pod_name = info.metadata.name[:12]
+
+        if running == None and terminated == None:
+            err_pod_lists += f"{namespace}  {pod_name}  "+ info.status.container_statuses[0].state.waiting.reason + "\n"
+            err_pod_num += 1
+
+    if err_pod_num == 0:
+        print("schedule_pod_check_Report : Stable")
+    else:
+        await errsend("-------------🚨 Pod Error Detect 🚨-------------", err_pod_lists)
+    
 
 async def conn_k8s():
     global api_client
@@ -169,8 +235,8 @@ async def conn_k8s():
         try:
             print("try connect")
             config.load_kube_config(
-                config_file="vm-kube-config"
-                )
+                config_file="view-config"
+            )
             api_client = client.CoreV1Api()
             resource = api_client.list_node()
             print("connect success")
